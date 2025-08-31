@@ -3,15 +3,14 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { auth, db } from "../firebase";
 import {
-    addDoc,
     collection,
     doc,
     onSnapshot,
-    orderBy,
     query,
     serverTimestamp,
     setDoc,
     getDoc,
+    writeBatch,
 } from "firebase/firestore";
 import { onAuthStateChanged } from "firebase/auth";
 import { useScope } from "../scope/ScopeContext";
@@ -32,12 +31,10 @@ export default function MyClinics() {
     const navigate = useNavigate();
     const { setOrg } = useScope();
 
-    // Keep an auth-driven uid here so effects re-run correctly when the user loads/changes
+    // נשמור uid שמגיע מ־auth כדי שהאפקטים ירוצו רק כשהוא מוכן/משתנה
     const [uid, setUid] = useState<string | null>(auth.currentUser?.uid ?? null);
-
     useEffect(() => {
-        // Subscribe to auth state to ensure uid is stable before opening Firestore listeners
-        const unsub = onAuthStateChanged(auth, u => setUid(u?.uid ?? null));
+        const unsub = onAuthStateChanged(auth, (u) => setUid(u?.uid ?? null));
         return unsub;
     }, []);
 
@@ -55,9 +52,8 @@ export default function MyClinics() {
     const [saving, setSaving] = useState(false);
     const [clinicName, setClinicName] = useState("");
 
-    // Load the membership list from users/{uid}/orgMemberships
+    // מאזין לרשימת המרפאות של המשתמש מ־users/{uid}/orgMemberships
     useEffect(() => {
-        // If there is no uid yet, show a neutral state and don't open a listener
         if (!uid) {
             setRows([]);
             setLoading(false);
@@ -68,8 +64,9 @@ export default function MyClinics() {
         setLoading(true);
         setError(null);
 
+        // חשוב: בלי orderBy בצד שרת (נמיין בצד לקוח), כדי להימנע מבאגים בזרם בזמן כתיבות מרובות
         const ref = collection(db, "users", uid, "orgMemberships");
-        const qref = query(ref, orderBy("orgName", "asc")); // stable UX; final sort is client-side too
+        const qref = query(ref);
 
         const unsub = onSnapshot(
             qref,
@@ -84,7 +81,6 @@ export default function MyClinics() {
             },
             (err) => {
                 console.error("MyClinics subscription error:", err);
-                // Surface a friendly error; permission-denied is the most common here
                 setError(err?.message || "Failed to load clinics");
                 setLoading(false);
             }
@@ -117,9 +113,8 @@ export default function MyClinics() {
     }, [rows, q, sortBy]);
 
     const doSwitchTo = (orgId: string, orgName: string) => {
-        // Switch scope to this org (no SOLO mode in the app anymore)
         setOrg(orgId, orgName);
-        // navigate("/calendar"); // optional: keep user on same page for now
+        // navigate("/calendar"); // אם תרצה לנווט מיידית
     };
 
     const goToClinic = (orgId: string) => {
@@ -132,15 +127,14 @@ export default function MyClinics() {
     };
 
     /**
-     * Create flow (org-only model):
-     * 1) Create orgs/{newId} with name & owner metadata
-     * 2) Create orgs/{newId}/users/{uid} — org-scoped user profile (display data)
-     * 3) Create orgs/{newId}/members/{uid} — **role source used by Security Rules**
-     * 4) Create users/{uid}/orgMemberships/{newId} — user-centric index for fast listing
+     * Create flow (org-only model) — אטומי ב-batch:
+     * 1) orgs/{newId}                  — יצירת ארגון
+     * 2) orgs/{newId}/members/{uid}    — מקור התפקידים/חברות
+     * 3) users/{uid}/orgMemberships/{newId} — אינדקס משתמש לרשימה מהירה
      *
-     * Note: steps (2) and (3) look similar but serve different purposes:
-     *  - /users/: display/profile fields under the org (preferences later)
-     *  - /members/: minimal role-bearing doc used by rules’ isMember()/role() helpers
+     * הערות:
+     * - משתמשים ב-setDoc על מזהי מסמכים שנקבעים מראש כדי להימנע ממצבי ביניים.
+     * - הקריאות נעשות ב-writeBatch כדי למנוע “פינג־פונג” של מאזינים בזמן ביניים.
      */
     const onCreateClinic = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -150,14 +144,11 @@ export default function MyClinics() {
 
         setSaving(true);
         try {
-            // (1) create org
-            const orgRef = await addDoc(collection(db, "orgs"), {
-                name,
-                createdAt: serverTimestamp(),
-                createdBy: uid,
-            });
+            // נכין מזהה ארגון מראש
+            const orgRef = doc(collection(db, "orgs"));
+            const orgId = orgRef.id;
 
-            // Read private profile (if exists) to seed org-scoped profile doc
+            // נמשוך פרטי משתמש פרטיים כדי לזרוע לשדות תצוגה
             let firstName = "";
             let lastName = "";
             let email = auth.currentUser?.email || "";
@@ -171,12 +162,21 @@ export default function MyClinics() {
                     email = d.email || email;
                 }
             } catch {
-                // Safe fallback to auth data if private profile is unavailable
+                // fallback — נשאר עם auth
             }
 
+            const batch = writeBatch(db);
 
-            // (2) members doc (required by rules isMember()/role())
-            await setDoc(doc(db, "orgs", orgRef.id, "members", uid), {
+            // (1) יצירת מסמך הארגון
+            batch.set(orgRef, {
+                name,
+                createdAt: serverTimestamp(),
+                createdBy: uid,
+            });
+
+            // (2) חברים — מקור הרשאות
+            const memberRef = doc(db, "orgs", orgId, "members", uid);
+            batch.set(memberRef, {
                 userId: uid,
                 email,
                 firstName,
@@ -185,17 +185,24 @@ export default function MyClinics() {
                 addedAt: serverTimestamp(),
             });
 
-            // (3) membership index under the user's root (for fast navigation)
-            await setDoc(doc(db, "users", uid, "orgMemberships", orgRef.id), {
-                orgId: orgRef.id,
+            // (3) אינדקס למשתמש
+            const membershipRef = doc(db, "users", uid, "orgMemberships", orgId);
+            batch.set(membershipRef, {
+                orgId,
                 orgName: name,
                 role: "owner" as Role,
                 joinedAt: serverTimestamp(),
             });
-            await setOrg(orgRef.id, name);
+
+            // ביצוע אטומי
+            await batch.commit();
+
+            // נעדכן scope וננקה את המודל
+            await setOrg(orgId, name);
             setOpenCreate(false);
             resetCreate();
         } catch (err: any) {
+            console.error("Create clinic failed:", err);
             alert(err?.message || "Failed to create clinic");
             setSaving(false);
         }
@@ -349,8 +356,8 @@ export default function MyClinics() {
                                     value={clinicName}
                                     onChange={(e) => setClinicName(e.target.value)}
                                     className={`w-full rounded-xl border px-3 py-2 outline-none focus:ring-2 ${!clinicName.trim()
-                                        ? "border-rose-300 focus:border-rose-400 focus:ring-rose-100"
-                                        : "border-slate-300 focus:border-indigo-400 focus:ring-indigo-100"
+                                            ? "border-rose-300 focus:border-rose-400 focus:ring-rose-100"
+                                            : "border-slate-300 focus:border-indigo-400 focus:ring-indigo-100"
                                         }`}
                                     placeholder="e.g., Mindful Care Center"
                                     required
@@ -367,7 +374,7 @@ export default function MyClinics() {
                                         <>
                                             <svg className="mr-2 h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                                                 <circle cx="12" cy="12" r="10" className="opacity-25" />
-                                                <path d="M4 12a8 8 0 0 1 8-8" className="opacity-75" />
+                                                <path d="M4 12a 8 8 0 0 1 8-8" className="opacity-75" />
                                             </svg>
                                             Creating…
                                         </>
