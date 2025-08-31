@@ -1,0 +1,56 @@
+# === OS / Editors ===
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# === Logs ===
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# === Node / Build Artifacts ===
+**/node_modules/
+**/dist/
+**/build/
+.vite/             # (לפעמים נוצרה תיקייה בקאש מחוץ ל-node_modules)
+**/.eslintcache
+**/*.tsbuildinfo
+
+# === Env files (אל תעלה סודות) ===
+.env
+.env.*
+frontend/.env*
+functions/.env*
+
+# === Firebase / Emulators ===
+.firebase/
+firebase-debug.log
+.emulator-data/
+# שמור את קבצי הקונפיג עצמם ב-Git:
+# .firebaserc  ✅ (להשאיר)
+# firebase.json ✅ (להשאיר)
+
+# === Functions (TS build output) ===
+functions/lib/
+
+# === Tests / Coverage / Cypress ===
+coverage/
+cypress/videos/
+cypress/screenshots/
+
+
+# סביבות מקומיות (לא עולות ל-git)
+frontend/.env*
+functions/.env*
+
+# החרגות: כן להעלות example
+!frontend/.env.example
+!functions/.env.example
